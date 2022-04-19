@@ -4,7 +4,7 @@
 Bit Shift Assembler
 *******************
 
-Version: 02-Jan-2021
+Version: 09-Mar-2022
 
 The assembler was developed and tested on a MAC with OS Catalina.
 Using no specific options of the host system, it should run on any
@@ -229,6 +229,7 @@ char *CPU_Name = "6502";
 #define AM_Indi 13
 #define AM_Quad 14
 
+#define AM_MODES 15
 
 // ***********************************
 // Mnemonics with implied address mode
@@ -375,14 +376,16 @@ int JSRIndex;
 int BITIndex;
 int STYIndex;
 int PHWIndex;
+int LDAIndex;
+int STAIndex;
 int NegNeg;
 int PreNop;
 
 struct GenStruct
 {
-   char Mne[5];       // Mnemonic
-   int  CPU;          // CPU type
-   int  Opc[9];       // Opcodes
+   char Mne[5];        // Mnemonic
+   int  CPU;           // CPU type
+   int  Opc[AM_MODES]; // Opcodes
 } Gen[] =
 {
    //             0    1    2    3    4    5    6    7    8
@@ -434,6 +437,7 @@ struct GenStruct
 // menmonics for 45GS02 32 bit instructions with the Q register
 // the Q register is a combination of A,X,Y,Z
 // address modes are:
+// accumulator         LSR  Q       Q
 // base page quad      LDQ  dp      8 bit address
 // absolute  quad      LDQ  nnnn   16 bit address
 // indirect  quad      LDQ  (dp)   16 bit address indirect
@@ -604,6 +608,8 @@ int CurrentMacro;   // Macro index
 int ModuleStart;    // Address of a module
 int WordOC;         // List 2 byte opcodes as word
 
+unsigned char ROM_Fill;
+
 int ERRMAX = 10;    // Stop assemby after ERRMAX errors
 int LoadAddress = UNDEF;
 char *MacroPointer;
@@ -614,10 +620,12 @@ int bp;      // base page
 int oc;      // op code
 int am;      // address mode
 int il;      // instruction length
+int ml;      // mnemonic length
 int pc = -1; // program counter
 int bss;     // bss counter
 int Pass;
-#define MAXPASS 12
+int o16;     // force 16 bit operand
+#define MAXPASS 20
 int BOC[MAXPASS];       // branch opt count
 int MaxPass = MAXPASS;
 int BSO_Mode;
@@ -728,9 +736,11 @@ char *SkipSpace(char *p)
 // isym
 // ****
 
-int isym(char c)
+int isym(char *c)
 {
-   return (c == '_' || c == '$' || c == '.' || isalnum(c));
+   if (*c == '_' || *c == '$' || *c == '.' || isalnum(*c)) return 1;
+   if (*c == '@' && isalpha(c[1])) return 1;
+   return 0;
 }
 
 // *****
@@ -760,7 +770,7 @@ int isnnd(char *p)
 
 char *GetSymbol(char *p, char *s)
 {
-   // char *dfs = s;
+    char *dfs = s;
 
 
    // expand BSO local symbols like 40$ to Label_40$
@@ -790,8 +800,7 @@ char *GetSymbol(char *p, char *s)
 
    // copy alphanumeric characters to symbol
 
-   if (*p == '_' || *p == '$' || *p == '.' || isalnum(*p))
-      while (isym(*p)) *s++ = *p++;
+   while (isym(p)) *s++ = *p++;
 
    // terminate string
 
@@ -799,14 +808,12 @@ char *GetSymbol(char *p, char *s)
 
    // debug output
 
-/*
    if (df)
    {
       fprintf(df,"GetSymbol:");
       if (Scope[0]) fprintf(df,"Scope:[%s]",Scope);
       fprintf(df,"%s\n",dfs);
    }
-*/
    return p;
 }
 
@@ -845,6 +852,8 @@ void ErrorLine(char *p)
    int i,ep;
    printf("%s\n",Line);
    ep = p - Line;
+   if (ep < 0 || ep > 79) return;
+
    for (i=0 ; i < ep ; ++i) printf(" ");
    printf("^\n");
 }
@@ -920,7 +929,8 @@ int OperandExists(char *p)
 {
    while (isspace(*p)) ++p;
    if (*p == ';' || *p ==  0 ) return 0;
-   if (*p != 'A' && *p != 'a') return 1;
+   if (*p != 'A' && *p != 'a' && *p != 'Q' && *p != 'q') return 1;
+   if (CPU_Type != CPU_45GS02 && (*p == 'Q' || *p == 'q')) return 1;
 
    // treat accumulator mode as implied
 
@@ -929,19 +939,30 @@ int OperandExists(char *p)
    return (*p != ';' && *p !=  0 );
 }
 
+int Qumulator(char *p)
+{
+   while (isspace(*p)) ++p;
+   if (*p != 'Q' && *p != 'q') return 0;
+   if (p[1] == 0) return 1;
+   if (isym(p+1)) return 0;
+   return 1;
+}
+
 // *************
 // IsInstruction
 // *************
 
 int IsInstruction(char *p)
 {
-   unsigned int i,l,bn;
+   unsigned int i,l,bn,oe;
 
    // Initialize
 
    am  = AM_None; // address mode
+   o16 = 0;       // forced operand 16 bit
    Mne = NULL;    // menmonic
    GenIndex = -1;
+   ml = 3;
 
    // length of mnemonic must be 3 or 4
 
@@ -987,6 +1008,7 @@ int IsInstruction(char *p)
       if (!Strncasecmp(p,MneQ[i],l) && isspace(p[l]))
       {
          Mne = MneQ[i];
+         if (Qumulator(p+l)) break;
          GenIndex = i;
          return 512+i;
       }
@@ -1017,11 +1039,22 @@ int IsInstruction(char *p)
 
    // chacter after mnemonic must be zero or white space
 
-   if (p[3] && !isspace(p[3])) return -1;
+   if (CPU_Type == CPU_45GS02 && strlen(p) > 3 &&
+       (p[3] == 'Q' || p[3] == 'q'))
+   {
+      if (p[4] != 0 && !isspace(p[4])) return -1;
+      oe = OperandExists(p+4);
+      ml = 4;
+   }
+   else
+   {
+      if (p[3] != 0 && !isspace(p[3])) return -1;
+      oe = OperandExists(p+3);
+   }
 
    // Check table of implied instructions
 
-   if (!OperandExists(p+3))
+   if (!oe)
    for (i=0 ; i < IMPS ; ++i)
    {
       if (!Strncasecmp(p,Imp[i].Mne,3) // match mnemonic
@@ -1030,6 +1063,7 @@ int IsInstruction(char *p)
          am  = AM_Impl;
          Mne = Imp[i].Mne;
          if (df) fprintf(df,"Imp:%s %2.2x\n",Mne,Imp[i].Opc);
+         if (p[3] == 'Q' || p[3] == 'q') return 512+Imp[i].Opc;
          return Imp[i].Opc;
       }
    }
@@ -1103,11 +1137,11 @@ char *SetPC(char *p)
       }
    }
    else p += 3; // .ORG syntax
+   PrintPCLine();
    p = EvalOperand(p+1,&v,0);
    if (df) fprintf(df,"PC = %4.4x\n",v);
    pc = v;
    if (LoadAddress == UNDEF) LoadAddress = pc;
-   PrintPCLine();
    if (GenStart > pc) GenStart = pc; // remember lowest pc value
    return p;
 }
@@ -1174,7 +1208,7 @@ int MacroIndex(char *p)
    for (i = 0 ; i < Macros ; ++i)
    {
       l = strlen(Mac[i].Name);
-      if (!StrnCmp(p,Mac[i].Name,l) && !isym(p[l])) return i;
+      if (!StrnCmp(p,Mac[i].Name,l) && !isym(p+l)) return i;
    }
    return -1;
 }
@@ -1191,12 +1225,16 @@ char *DefineLabel(char *p, int *val, int Locked)
       ErrorMsg("Too many labels (> %d)\n",MAXLAB);
       exit(1);
    }
+   if (df) fprintf(df,"DEFINE LABEL\n");
    p = GetSymbol(p,Label);
 
    // in BSO mode use scope
 
    if (BSO_Mode && isalpha(Label[0]) && !strncmp(Label,Line,strlen(Label)))
+   {
       strcpy(Scope,Label);
+      ModuleStart = pc;
+   }
 
    if (df) fprintf(df,"DefineLabel:%s\n",Label);
    if (*p == ':') ++p; // Ignore colon after label
@@ -1364,6 +1402,7 @@ char *EvalSymValue(char *p, int *v)
    int i;
    char Sym[ML];
 
+   if (df) fprintf(df,"EVALSYM\n");
    p = GetSymbol(p,Sym);
    for (i=0 ; i < Labels ; ++i)
    {
@@ -1446,6 +1485,25 @@ char *ParseLongData(char *p, int l)
    return p;
 }
 
+double BasicReal(unsigned char B[])
+{
+   double Mantissa;
+   double Result;
+   int  Sign;
+   int  Exponent;
+
+   Exponent =   B[0] - 128;
+   Sign     =   B[1] & 0x80;
+   Mantissa = ((unsigned long)(B[1] | 0x80) << 24)
+            +  (B[2]         << 16)
+            +  (B[3]         <<  8)
+            +  (B[4]              );
+   Result   = ldexp(Mantissa,Exponent-32);
+   if (Sign) Result = -Result;
+   return Result;
+}
+
+
 
 char *ParseRealData(char *p)
 {
@@ -1470,6 +1528,14 @@ char *ParseRealData(char *p)
       {
           if (!isxdigit(*p) || !isxdigit(*(p+1))) break;
           sscanf(p,"%2x",&v);
+          Operand[i] = v;
+      }
+   }
+   else if (*p == '@') // .real @204,@346,@032,@055,@033
+   {
+      for (i=0 ; i <= mansize ; ++i, p+=5)
+      {
+          sscanf(p+1,"%3o",&v);
           Operand[i] = v;
       }
    }
@@ -1538,13 +1604,14 @@ char *ParseRealData(char *p)
       fprintf(lf," %2.2x %2.2x %2.2x",Operand[0],Operand[1],Operand[2]);
       if (mansize == 3 && strncmp(Line,"   ",3)==0)
       {
-         fprintf(lf," %2.2x %s\n",Operand[3],Line+3);
+         fprintf(lf," %2.2x %s",Operand[3],Line+3);
       }
       else if (mansize == 4 && strncmp(Line,"      ",6)==0)
       {
-         fprintf(lf," %2.2x %2.2x %s\n",Operand[3],Operand[4],Line+6);
+         fprintf(lf," %2.2x %2.2x %s",Operand[3],Operand[4],Line+6);
       }
-      else fprintf(lf," %s\n",Line);
+      else fprintf(lf," %s",Line);
+      fprintf(lf," %20.10lf\n",BasicReal(Operand));
    }
    pc += mansize+1;
    return p;
@@ -1693,10 +1760,14 @@ struct unaop_struct unaop[UNAOPS] =
    {'*',&op_prc}, // program counter
    {'$',&op_hex}, // hex constant
    { 39,&op_cha}, // char constant
-   {'@',&op_oct}, // octal constant
    {'%',&op_bin}, // binary constant
-   {'?',&op_len}  // length of .BYTE data line
+   {'?',&op_len}, // length of .BYTE data line
+   {'@',&op_oct}  // octal constant
 };
+
+char unastring[UNAOPS+1] = "[(+-!~<>*$'%?";
+
+int unaops = UNAOPS-1;
 
 int op_mul(int l, int r) { return l *  r; }
 int op_div(int l, int r) { if (r) return l / r; else return UNDEF; }
@@ -1772,9 +1843,9 @@ char *EvalOperand(char *p, int *v, int prio)
    // Start parsing unary operators
    // < > * have special 6502 meanings
 
-   if (*p && strchr("[(+-!~<>*$'%?@",*p))
+   if (*p && strchr(unastring,*p))
    {
-      for (i=0 ; i < UNAOPS ; ++i)
+      for (i=0 ; i < unaops ; ++i)
       if (*p == unaop[i].op)
       {
           p = unaop[i].foo(p,v);
@@ -1782,7 +1853,7 @@ char *EvalOperand(char *p, int *v, int prio)
       }
    }
    else if (isdigit(c) && !isnnd(p)) p = EvalDecValue(p,v);
-   else if (isym(c)    ||  isnnd(p)) p = EvalSymValue(p,v);
+   else if (isym(p)    ||  isnnd(p)) p = EvalSymValue(p,v);
    else
    {
       ErrorLine(p);
@@ -1800,7 +1871,7 @@ char *EvalOperand(char *p, int *v, int prio)
 
    p = SkipSpace(p);
 
-   while (*p && strchr("*/+-<>=!&^|",*p))
+   while (*p && strchr("*/+-<>!&^|",*p))
    {
       // loop through all binary operators
 
@@ -1966,7 +2037,7 @@ char *ParseFillData(char *p)
    return p;
 }
 
-void ListSizeInfo()
+char *ListSizeInfo(char *p)
 {
    int i;
 
@@ -1980,6 +2051,7 @@ void ListSizeInfo()
                   pc-ModuleStart,pc-ModuleStart);
       fprintf(lf,"\n");
    }
+   return p + strlen(p);
 }
 
 
@@ -2320,7 +2392,16 @@ char *ParseByteData(char *p, int Charset)
          if (i < 3) fprintf(lf," %2.2x",ByteBuffer[i]);
       }
       for (i=l ; i < 3 ; ++i) fprintf(lf,"   ");
-      fprintf(lf," %s\n",Line);
+      if (l == 4 && strncmp(Line,"   ",3)==0)
+      {
+         fprintf(lf," %2.2x %s",ByteBuffer[3],Line+3);
+      }
+      else if (l == 5 && strncmp(Line,"      ",6)==0)
+      {
+         fprintf(lf," %2.2x %2.2x %s",ByteBuffer[3],ByteBuffer[4],Line+6);
+      }
+      else fprintf(lf," %s",Line);
+      fprintf(lf,"\n");
    }
    pc += l;
    return p;
@@ -2353,10 +2434,14 @@ char *IsPseudo(char *p)
    else if (!Strncasecmp(p,"ORG",3))     p = SetPC(p);
    else if (!Strncasecmp(p,"LOAD",4))    WriteLA = 1;
    else if (!Strncasecmp(p,"INCLUDE",7)) p = IncludeFile(p+7);
-   else if (!Strncasecmp(p,"SIZE",4))    ListSizeInfo();
+   else if (!Strncasecmp(p,"!SRC",4))    p = IncludeFile(p+4);
+   else if (!Strncasecmp(p,"SIZE",4))    p = ListSizeInfo(p);
    else if (!Strncasecmp(p,"SKI",3))     p += strlen(p);
    else if (!Strncasecmp(p,"PAG",3))     p += strlen(p);
+   else if (!Strncasecmp(p,"NAM",3))     p += strlen(p);
+   else if (!Strncasecmp(p,"SUBTTL",6))  p += strlen(p);
    else if (!Strncasecmp(p,"END",3))     p += strlen(p);
+   else if (!Strncasecmp(p,"!ADDR ",6))  p += 6;
    if (pc > 0x10000 && pc != UNDEF)
    {
       ErrorMsg("Program counter overflow\n");
@@ -2380,6 +2465,14 @@ int AddressMode(unsigned char *p)
    int oi = 0;
    int mi = 0;
    int ii = 0;
+
+   // remove ",Z" for Q instructions
+
+   if (l > 2 && oc > 511 && p[l-2] == ',' && (p[l-1] == 'z' || p[l-1] == 'Z'))
+   {
+      l -= 2;
+      p[l] = 0;
+   }
 
    // remove redundant pair of brackets
    // or identify Q operation with 32 bit address
@@ -2410,6 +2503,13 @@ int AddressMode(unsigned char *p)
       return AM_Imme;
    }
 
+   if (s == '`')
+   {
+      p[0] = ' ';
+      o16 = 1;
+      il = 3;
+   }
+
    if (s != '(' && s != '[') s = 0;
 
    // outer character
@@ -2427,6 +2527,7 @@ int AddressMode(unsigned char *p)
 
       // middle character
 
+      if (l > 0 && p[l-1] == ' ') --l; // e.g. addr, x
       if (l > 0) m = toupper(p[l-1]);
       if (m != ',' && m != 'X') m = 0;
       else mi = l-1;
@@ -2539,6 +2640,7 @@ char * SplitOperand(char *p)
 
    // valid address mode for Q instructions are:
 
+   // AM_Impl  Q
    // AM_Dpag  base page
    // AM_Abso  absolute
    // AM_      indirect
@@ -2551,6 +2653,11 @@ char * SplitOperand(char *p)
       {
          oc = Gen[GenIndex].Opc[am];
          il = 5;
+      }
+      else if (am == AM_Impl)
+      {
+         oc = Gen[GenIndex].Opc[am];
+         il = 3;
       }
       else if (am == AM_Indz)
       {
@@ -2680,6 +2787,14 @@ void AdjustOpcode(int *v)
    {
       *v = (*v << 8) | oc;
       oc = 0xea;   // NOP   (DP),Z
+      return;
+   }
+
+   // MEGA65 qumulator
+
+   if (am == AM_Impl && il == 3)
+   {
+      NegNeg = 1;
       return;
    }
 
@@ -2824,20 +2939,30 @@ char *GenerateCode(char *p)
    w = 0; // operand value - base value
    o = (char *)Operand;
 
+   if (df) fprintf(df,"GenerateCode %4.4X %d %s\n",pc,am,p);
    if (pc < 0)
    {
       ErrorLine(p);
       ErrorMsg("Undefined program counter (PC)\n");
       exit(1);
    }
-   if (df) fprintf(df,"GenerateCode %4.4X %d %s\n",pc,am,p);
 
    // implied instruction (no operand or implied A register)
 
+   if (df) fprintf(df,"Implied: oc = %d\n",oc);
    if (am == AM_Impl)
    {
-      il = 1;              // instruction length
-      p += 3;              // skip mnemonic
+      if (oc > 511)
+      {
+         il = 3;
+         p += ml;
+         oc -= 512;
+      }
+      else
+      {
+         il = 1;              // instruction length
+         p += 3;              // skip mnemonic
+      }
    }
 
    // test & branch  BBRn dp,label
@@ -3008,7 +3133,7 @@ char *GenerateCode(char *p)
             exit(1);
          }
       }
-      else if (w >= 0 && w < 256 && GenIndex >= 0)
+      else if (w >= 0 && w < 256 && GenIndex >= 0 && o16 == 0)
       {
          if (am == AM_Abso && Gen[GenIndex].Opc[AM_Dpag] >= 0)
          {
@@ -3044,6 +3169,23 @@ char *GenerateCode(char *p)
       ErrorMsg("Operand missing\n");
       exit(1);
    }
+
+   // check for LDA (bp,SP),Y or STA (bp,SP),Y
+
+   if (CPU_Type == CPU_45GS02 && am == AM_Indy && !Strncasecmp(o,",SP",3))
+   {
+      if (GenIndex == LDAIndex)
+      {
+          oc = 0xe2;
+          *o = 0;
+      }
+      if (GenIndex == STAIndex)
+      {
+          oc = 0x82;
+          *o = 0;
+      }
+   }
+
    if (*o && *o != ';')
    {
       ErrorLine(p);
@@ -3097,13 +3239,13 @@ char *GenerateCode(char *p)
          ROM[pl++] = lo;
          fprintf(lf," %2.2x",lo&0xff);
       }
-      else if (il < 4) fprintf(lf,"   ");
+      else if (il < 3) fprintf(lf,"   ");
       if (pl < pc+il)
       {
          ROM[pl++] = hi;
          fprintf(lf," %2.2x",hi&0xff);
       }
-      else if (il < 4) fprintf(lf,"   ");
+      else if (il < 3) fprintf(lf,"   ");
       if (il > 3 && !strncmp(li,"   ",3)) li += 3;
       if (il > 4 && !strncmp(li,"   ",3)) li += 3;
       fprintf(lf," %s",li);
@@ -3174,7 +3316,7 @@ void RecordMacro(char *p)
       exit(1);
    }
    bl = 1;
-   p = NextSymbol(p,Macro);
+   p = NextSymbol(p,Macro);  // macro name
    l = strlen(Macro);
    p = SkipSpace(p);
    if (*p == '(')
@@ -3243,7 +3385,15 @@ void RecordMacro(char *p)
          }
          Macros++;
       }
-      else if (Pass == MaxPass) // List macro
+      else     // skip macro body
+      {
+         while (!feof(sf) && !Strcasestr(Line,"ENDMAC"))
+         {
+            ++LiNo;
+            fgets(Line,sizeof(Line),sf);
+         }
+      }
+      if (Pass == MaxPass) // List macro
       {
          PrintLiNo(1);
          ++LiNo;
@@ -3257,12 +3407,6 @@ void RecordMacro(char *p)
             if (pf) fprintf(pf,"%s",Line);
          } while (!feof(sf) && !Strcasestr(Line,"ENDMAC"));
          LiNo-=2;
-      }
-      else if (Pass == MaxPass)
-      {
-         ++ErrNum;
-         ErrorMsg("Duplicate macro [%s]\n",Macro);
-         exit(1);
       }
       if (df) fprintf(df,"Macro [%s] = %s\n",Mac[j].Name,Mac[j].Body);
    }
@@ -3374,11 +3518,11 @@ char *ParseEndMod(char *p)
 {
    if (Pass == MaxPass)
    {
-      ListSizeInfo();
+      ListSizeInfo(p);
    }
    Scope[0] = 0;
    ModuleStart = 0;
-   return p;
+   return p+strlen(p);
 }
 
 
@@ -3392,6 +3536,7 @@ void ParseLine(char *cp)
    int v,m;
    // char *start = cp;  // Remember start of line
 
+   if (df) fprintf(df,"Pass %d:ParseLine:%s\n",Pass,cp);
    am = -1;
    oc = -1;
    Label[0] = 0;
@@ -3420,6 +3565,7 @@ void ParseLine(char *cp)
       }
       return;
    }
+   if (!Strncasecmp(cp,"!ADDR ",6))    cp += 6;
    if (!Strncasecmp(cp,"MODULE",6))    cp = ParseModule(cp+6);
    if (!Strncasecmp(cp,"ENDMOD",6))    cp = ParseEndMod(cp+6);
    if (*cp =='_' || isalpha(*cp) || isnnd(cp)) // Macro, Label or mnemonic
@@ -3427,6 +3573,8 @@ void ParseLine(char *cp)
       if (!Strncasecmp(cp,"MACRO ",6))
       {
          RecordMacro(cp+6);
+         if (df) fprintf(df,"Macro recorded\n");
+         if (df) fprintf(df,"Line:%s\n",Line);
          return;
       }
       if ((oc = IsInstruction(cp)) < 0)
@@ -3451,6 +3599,14 @@ void ParseLine(char *cp)
    if (*cp == '*') cp = SetPC(cp);       // Set program counter
    if (*cp == '&') cp = SetBSS(cp);      // Set BSS counter
    if (*cp == '.') cp = IsPseudo(cp+1);  // Pseudo Op with dot
+   if (*cp == '!') cp = IsPseudo(cp);    // Pseudo Op with exclamation mark
+   if (*cp == ',')
+   {
+      ++ErrNum;
+      ErrorLine(cp);
+      ErrorMsg("Syntax Error");
+      exit(1);
+   }
    if (*cp)        cp = IsPseudo(cp);    // Pseudo Op
    if (ForcedEnd) return;
    if (oc < 0) oc = IsInstruction(cp); // Check for mnemonic after label
@@ -3753,6 +3909,9 @@ int main(int argc, char *argv[])
       CPU_Name   = CPU_Names[3];
       BranchOpt  = 1;
       IgnoreCase = 1;
+      ROM_Fill   = 0xff;
+      unaops++;      // allow octal constants
+      strcpy(unastring,"[(+-!~<>*$'%?@");
    }
 
    strcpy(Pre,Src);
@@ -3763,7 +3922,7 @@ int main(int argc, char *argv[])
 
    printf("\n");
    printf("*******************************************\n");
-   printf("* Bit Shift Assembler 02-Jan-2021         *\n");
+   printf("* Bit Shifter's Assembler 31-Mar-2022     *\n");
    printf("* --------------------------------------- *\n");
    printf("* Source: %-31.31s *\n",Src);
    printf("* List  : %-31.31s *\n",Lst);
@@ -3788,6 +3947,10 @@ int main(int argc, char *argv[])
    BITIndex = GetIndex("BIT");
    STYIndex = GetIndex("STY");
    PHWIndex = GetIndex("PHW");
+   LDAIndex = GetIndex("LDA");
+   STAIndex = GetIndex("STA");
+
+   memset(ROM,ROM_Fill,sizeof(ROM));
 
    for (Pass = 1 ; Pass < MaxPass ; ++Pass)
    {

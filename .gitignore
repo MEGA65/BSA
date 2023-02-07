@@ -1,0 +1,4 @@
+bsa
+*.dSYM
+.DS_Store
+.mypy_cache

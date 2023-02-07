@@ -7,4 +7,4 @@ bsa:
 .PHONY: clean
 
 clean:
-	rm bsa
+	rm -f bsa

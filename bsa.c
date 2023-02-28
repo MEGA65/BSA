@@ -3415,27 +3415,24 @@ void RecordMacro(char *p)
          }
          Macros++;
       }
-      else     // skip macro body
+      else    // skip macro body, printing to lf on last pass
       {
-         while (!feof(sf) && !Strcasestr(Line,"ENDMAC"))
-         {
+         if (Pass == MaxPass) {
+            PrintLiNo(1);
             ++LiNo;
-            fgets(Line,sizeof(Line),sf);
+            fprintf(lf,"            %s\n",Line);
          }
-      }
-      if (Pass == MaxPass) // List macro
+         while (!feof(sf) && !Strcasestr(Line,"ENDMAC"))
       {
-         PrintLiNo(1);
          ++LiNo;
-         fprintf(lf,"            %s\n",Line);
-         do
-         {
             fgets(Line,sizeof(Line),sf);
+            if (Pass == MaxPass) {
             PrintLiNo(1);
             ++LiNo;
             fprintf(lf,"            %s",Line);
             if (pf) fprintf(pf,"%s",Line);
-         } while (!feof(sf) && !Strcasestr(Line,"ENDMAC"));
+            }
+         }
          LiNo-=2;
       }
       if (df) fprintf(df,"Macro [%s] = %s\n",Mac[j].Name,Mac[j].Body);

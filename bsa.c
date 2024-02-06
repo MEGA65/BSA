@@ -1126,6 +1126,27 @@ char *ParseCaseData(char *p)
    return p+1;
 }
 
+char *ParseAssertData(char *p)
+{
+   int v;
+   p = SkipSpace(p);
+   p = EvalOperand(p,&v,0);
+   if (v == UNDEF && Pass == MaxPass)
+   {
+      ErrorMsg("Undefined symbol in ASSERT expression\n");
+      ErrorLine(p);
+      exit(1);
+   }
+   if ((Pass == MaxPass) && !v)
+   {
+      ErrorMsg("Assertion failed, * = $%x\n", pc);
+      ErrorLine(p);
+      exit(1);
+   }
+   PrintLine();
+   return p+1;
+}
+
 char *SetPC(char *p)
 {
    int v;
@@ -2473,6 +2494,7 @@ char *IsPseudo(char *p)
    else if (!Strncasecmp(p,"CPU",3))     p = ParseCPUData(p+3);
    else if (!Strncasecmp(p,"BASE",4))    p = ParseBaseData(p+4);
    else if (!Strncasecmp(p,"CASE",4))    p = ParseCaseData(p+4);
+   else if (!Strncasecmp(p,"ASSERT",6))  p = ParseAssertData(p+6);
    else if (!Strncasecmp(p,"ORG",3))     p = SetPC(p);
    else if (!Strncasecmp(p,"LOAD",4))    WriteLA = 1;
    else if (!Strncasecmp(p,"INCLUDE",7)) p = IncludeFile(p+7);

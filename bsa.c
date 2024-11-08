@@ -2128,7 +2128,7 @@ char *IncludeFile(char *p)
    }
    IncludeStack[IncludeLevel].LiNo = LiNo;
    IncludeStack[++IncludeLevel].fp = sf;
-   IncludeStack[IncludeLevel].Src = MallocOrDie(strlen(FileName + 1));
+   IncludeStack[IncludeLevel].Src = MallocOrDie(strlen(FileName) + 1);
    strcpy(IncludeStack[IncludeLevel].Src, FileName);
    PrintLine();
    LiNo = 0;
